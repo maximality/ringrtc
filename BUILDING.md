@@ -49,7 +49,7 @@ Windows, we recommend ensuring that the `msvc` toolchain is installed and used f
 #### Android Dependencies
 
 You might need some of these. Of course it is assumed that you have the Android SDK installed,
-along with the NDK, LLDB, and SDK Tools options. A properly configured JDK (such as openjdk-8-jdk) is also assumed. You may also need the following (on Ubuntu):
+along with the NDK, LLDB, and SDK Tools options. A properly configured JDK (such as openjdk-11-jdk) is also assumed. You may also need the following (on Ubuntu):
 
     sudo apt install libglib2.0-dev
 
@@ -162,7 +162,7 @@ and where the (optional) `NODEJS_ARCH` can be:
 - `ia32`
 - `arm64`
 
-If no `NODEJS_ARCH` is provided, the build script will default to `x64`. Note that architectures other than `x64` are currently only supported through cross-compilation. That is, compiling for `arm64` on a `x64` machine works, but compiling for `arm64` on an `arm64` machine is not currently supported.
+If no `NODEJS_ARCH` is provided, the build script will default to `x64`. Note that architectures other than `x64` are primarily supported through cross-compilation. That is, compiling for `arm64` on a `x64` machine works, but compiling for `arm64` on an `arm64` machine is not supported on all platforms.
 
 When the build is complete, the library will be available here:
 

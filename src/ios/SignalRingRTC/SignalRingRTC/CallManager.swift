@@ -449,7 +449,12 @@ public class CallManager<CallType, CallManagerDelegateType>: CallManagerInterfac
     ///   - audioLevelsIntervalMillis: If non-zero, the desired interval between audio level events (in milliseconds)
     public func proceed(callId: UInt64, iceServers: [RTCIceServer], hideIp: Bool, videoCaptureController: VideoCaptureController, bandwidthMode: BandwidthMode, audioLevelsIntervalMillis: UInt64?) throws {
         AssertIsOnMainThread()
-        Logger.debug("proceed")
+        Logger.info("proceed(): callId: 0x\(String(callId, radix: 16)), hideIp: \(hideIp)")
+        for iceServer in iceServers {
+            for url in iceServer.urlStrings {
+                Logger.info("  server: \(url)");
+            }
+        }
 
         // Create a shared media sources.
         let audioConstraints = RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil)
@@ -918,8 +923,6 @@ public class CallManager<CallType, CallManagerDelegateType>: CallManagerInterfac
         */
         
         configuration.iceTransportPolicy = .all // Fork
-
-        configuration.enableDtlsSrtp = false
 
         // Create the default media constraints.
         let constraints = RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil)

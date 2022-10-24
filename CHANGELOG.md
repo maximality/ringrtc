@@ -1,5 +1,155 @@
 # Changelog
 
+## v2.21.2
+
+- Android: Fix possible crash from AndroidNetworkMonitor
+
+- Electron: Update dependencies (neon mainly)
+
+- Reference signalapp/webrtc@5005b
+  - Cherry-pick commits to fix issues
+
+## v2.21.1
+
+- Group Calls: Expose `isHigherResolutionPending` to apps
+
+- Android: Fix race when audio levels change early
+
+- iOS: Set deployment target to 12.2
+
+- Other logging improvements
+
+## v2.21.0
+
+- Update to WebRTC 5005 (m102)
+
+- Allow clients to specify the active speaker's height
+
+- Reference signalapp/webrtc@5005a
+  - Add logging for audio device timing
+
+## v2.20.14
+
+- Reference signalapp/webrtc@4896g
+  - Windows: Support multi-channel output
+
+## v2.20.13
+
+- Android: Remove audio level debug logging
+
+- Group Calls: Expose decoded video height to apps
+
+- Handle out-of-order IceCandidate and Hangup messages
+
+- Turn off backtraces to stderr by default
+
+## v2.20.12
+
+- Group Calls: Prefer recently received group call rings
+
+- Reduce binary size by dropping unicode support from the regex crate
+
+- Enforce that errors are handled on background tokio runtimes
+
+- Update Android builds
+  - Update gradle dependencies
+  - Use `-C linker` instead of ndk toolchains
+
+## v2.20.11
+
+- Add support for TURN over TLS
+
+- Android: Add echo likelihood to logs
+
+- Reference signalapp/webrtc@4896f
+  - Add support for TURN over TLS
+  - Enable echo detection
+
+- Update Rust
+
+- Update builds
+
+## v2.20.10
+
+- Group Calls: Enable audio recording properly
+
+## v2.20.9
+
+- Reference signalapp/webrtc@4896d
+  - Have one default port allocator flags instead of two
+
+## v2.20.8
+
+- Reference signalapp/webrtc@4896c
+  - Remove bitrate multiplier
+
+- Electron: Add logging to video support
+
+## v2.20.7
+
+- Log PeerConnection ICE gathering errors
+
+- Let rust core enable media (playback and recording), not clients
+
+## v2.20.6
+
+- Prioritize VP9 and H.264 hardware codecs for 1:1 calls
+
+- Add more logging for checking connectivity and group call issues
+
+- Update parse_log.py utility for more debugging
+
+- Reference signalapp/webrtc@4896b
+  - Cherry-pick upstream fixes for network crash and iOS audio/logging
+
+- Update Android builds
+
+## v2.20.5
+
+- Fix a deadlock when calling set_network_route
+
+## v2.20.4
+
+- Remove old video frames when re-enabling video
+
+- Use less bandwidth when using TURN relays
+
+- Improve support when developing on M1 chips
+
+- Avoid notifying remote ringing in case of accepted before connected 
+
+- Process remote status events received before the call is accepted
+
+- Android: Allow local video recording to be started while ringing
+
+- Reference signalapp/webrtc@4896a
+  - Fix issue with opus frame length for AudioSendStream
+
+- Adjust logging
+
+## v2.20.3
+
+- iOS: Fix mapping of log output
+
+## v2.20.2
+
+- Update to WebRTC 4896 (M100)
+
+- Disable transport-cc for audio
+
+## v2.20.1
+
+- Add VP9 codec support and enable for Android hardware/Electron
+
+- Add state for ConnectingAfterAccepted to fix connect/accept race on caller's end
+
+- Group Calls: Fire peek changed events even if the call is empty
+
+- Reference signalapp/webrtc@4638j
+  - Reduce more noise from error/warning logs
+
+- Update dependencies, builds, and ci
+
 ## v2.20.0
 
 - Clean up "lite" interfaces

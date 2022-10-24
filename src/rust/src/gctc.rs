@@ -3,6 +3,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //
 
+// This lint is under review, check in a future nightly update.
+#![allow(clippy::significant_drop_in_scrutinee)]
+
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::sync::{Arc, Mutex};
@@ -10,7 +13,10 @@ use std::sync::{Arc, Mutex};
 use log::info;
 
 use ringrtc::{
-    common::actor::{Actor, Stopper},
+    common::{
+        actor::{Actor, Stopper},
+        units::DataRate,
+    },
     core::{
         call_mutex::CallMutex,
         group_call::{
@@ -25,7 +31,7 @@ use ringrtc::{
     protobuf,
     webrtc::{
         media::{VideoFrame, VideoFrameMetadata, VideoPixelFormat, VideoSink, VideoTrack},
-        peer_connection::{AudioLevel, ReceivedAudioLevel},
+        peer_connection::{AudioLevel, ReceivedAudioLevel, SendRates},
         peer_connection_factory::{self, PeerConnectionFactory},
     },
 };
@@ -306,6 +312,12 @@ fn main() {
     )
     .unwrap();
 
+    let send_rate_override = DataRate::from_mbps(10);
+    client.override_send_rates(SendRates {
+        min: Some(send_rate_override),
+        start: Some(send_rate_override),
+        max: Some(send_rate_override),
+    });
     client.set_membership_proof(membership_proof.as_bytes().to_vec());
     client.connect();
     client.join();
@@ -369,7 +381,7 @@ fn main() {
         {
             info!("  {} {:?}", track_id, metadata);
         }
-        client.request_video(requests);
+        client.request_video(requests, height);
         std::thread::sleep(std::time::Duration::from_secs(10));
     }
 }

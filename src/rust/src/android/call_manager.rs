@@ -103,6 +103,7 @@ pub fn create_peer_connection(
         native_connection,
         false, /* enable_frame_encryption */
         false, /* enable_video_frame_event */
+        false, /* enable_video_frame_content */
     )?;
 
     // construct JNI OwnedPeerConnection object
@@ -535,11 +536,15 @@ pub fn set_video_enable(call_manager: *mut AndroidCallManager, enable: bool) -> 
     info!("set_video_enable():");
 
     let call_manager = unsafe { ptr_as_mut(call_manager)? };
-    let mut active_connection = call_manager.active_connection()?;
-    active_connection.update_sender_status(signaling::SenderStatus {
-        video_enabled: Some(enable),
-        ..Default::default()
-    })
+
+    if let Ok(mut active_connection) = call_manager.active_connection() {
+        active_connection.update_sender_status(signaling::SenderStatus {
+            video_enabled: Some(enable),
+            ..Default::default()
+        })
+    } else {
+        Ok(())
+    }
 }
 
 /// Request to update the bandwidth mode on the direct connection
@@ -818,6 +823,7 @@ pub fn request_video(
     call_manager: *mut AndroidCallManager,
     client_id: group_call::ClientId,
     jni_rendered_resolutions: JObject,
+    active_speaker_height: jint,
 ) -> Result<()> {
     info!("request_video(): id: {}", client_id);
 
@@ -883,7 +889,11 @@ pub fn request_video(
     }
 
     let call_manager = unsafe { ptr_as_mut(call_manager)? };
-    call_manager.request_video(client_id, rendered_resolutions);
+    call_manager.request_video(
+        client_id,
+        rendered_resolutions,
+        active_speaker_height as u16,
+    );
     Ok(())
 }
 

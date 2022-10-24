@@ -87,16 +87,18 @@ public class RemoteDeviceState: Hashable {
     public internal(set) var addedTime: UInt64  // unix millis
     public internal(set) var speakerTime: UInt64  // unix millis; 0 if they've never spoken
     public internal(set) var forwardingVideo: Bool?
+    public internal(set) var isHigherResolutionPending: Bool
     public internal(set) var audioLevel: UInt16
 
     public internal(set) var videoTrack: RTCVideoTrack?
 
-    init(demuxId: UInt32, userId: UUID, mediaKeysReceived: Bool, addedTime: UInt64, speakerTime: UInt64) {
+    init(demuxId: UInt32, userId: UUID, mediaKeysReceived: Bool, addedTime: UInt64, speakerTime: UInt64, isHigherResolutionPending: Bool) {
         self.demuxId = demuxId
         self.userId = userId
         self.mediaKeysReceived = mediaKeysReceived
         self.addedTime = addedTime
         self.speakerTime = speakerTime
+        self.isHigherResolutionPending = isHigherResolutionPending
         self.audioLevel = 0
     }
 
@@ -425,7 +427,14 @@ public class GroupCall {
         ringrtcSetBandwidthMode(self.ringRtcCallManager, clientId, bandwidthMode.rawValue)
     }
 
-    public func updateVideoRequests(resolutions: [VideoRequest]) {
+    /// Provides a collection of VideoRequest objects to the group call
+    /// object which are sent to the SFU. This allows the appropriate
+    /// video resolution to be sent from the SFU to efficiently fit in
+    /// rendered resolution on the screen.
+    ///
+    /// - parameter resolutions: the VideoRequest objects for each user rendered on the screen
+    /// - parameter activeSpeakerHeight: the height of the view for the active speaker, in pixels
+    public func updateVideoRequests(resolutions: [VideoRequest], activeSpeakerHeight: UInt16) {
         AssertIsOnMainThread()
         Logger.debug("updateVideoRequests")
 
@@ -452,7 +461,7 @@ public class GroupCall {
             )
         }
 
-        ringrtcRequestVideo(self.ringRtcCallManager, clientId, &appResolutionArray)
+        ringrtcRequestVideo(self.ringRtcCallManager, clientId, &appResolutionArray, activeSpeakerHeight)
     }
 
     public func updateGroupMembers(members: [GroupMember]) {
@@ -594,7 +603,7 @@ public class GroupCall {
 
     func handleIncomingVideoTrack(remoteDemuxId: UInt32, videoTrack: RTCVideoTrack) {
         AssertIsOnMainThread()
-        Logger.debug("handleIncomingVideoTrack() for remoteDemuxId: \(remoteDemuxId)")
+        Logger.debug("handleIncomingVideoTrack() for remoteDemuxId: 0x\(String(remoteDemuxId, radix: 16))")
 
         guard let remoteDeviceState = self.remoteDeviceStates[remoteDemuxId] else {
             Logger.debug("No remote device state found for remoteDemuxId")

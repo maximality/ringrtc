@@ -863,11 +863,18 @@ func callManagerInterfaceHandleRemoteDevicesChanged(object: UnsafeMutableRawPoin
         let remoteDeviceState = remoteDeviceStates.states[index]
 
         guard let userId = remoteDeviceState.user_id.asData() else {
-            Logger.debug("missing userId for demuxId: \(remoteDeviceState.demuxId)")
+            Logger.debug("missing userId for demuxId: 0x\(String(remoteDeviceState.demuxId, radix: 16))")
             continue
         }
 
-        let deviceState = RemoteDeviceState(demuxId: remoteDeviceState.demuxId, userId: userId.uuid, mediaKeysReceived: remoteDeviceState.mediaKeysReceived, addedTime: remoteDeviceState.addedTime, speakerTime: remoteDeviceState.speakerTime)
+        let deviceState = RemoteDeviceState(
+            demuxId: remoteDeviceState.demuxId,
+            userId: userId.uuid,
+            mediaKeysReceived: remoteDeviceState.mediaKeysReceived,
+            addedTime: remoteDeviceState.addedTime,
+            speakerTime: remoteDeviceState.speakerTime,
+            isHigherResolutionPending: remoteDeviceState.isHigherResolutionPending
+        )
 
         if remoteDeviceState.audioMuted.valid {
             deviceState.audioMuted = remoteDeviceState.audioMuted.value

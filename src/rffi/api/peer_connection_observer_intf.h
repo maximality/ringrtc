@@ -25,6 +25,10 @@ namespace rffi {
   /* NetworkRoute structure passed between Rust and C++ */
   typedef struct {
      rtc::AdapterType local_adapter_type;
+     rtc::AdapterType local_adapter_type_under_vpn;
+     bool local_relayed;
+     TransportProtocol local_relay_protocol;
+     bool remote_relayed;
   } NetworkRoute;
 } // namespace rffi
 } // namespace webrtc
@@ -62,7 +66,8 @@ RUSTEXPORT webrtc::rffi::PeerConnectionObserverRffi*
 Rust_createPeerConnectionObserver(void* observer_borrowed,
                                   const PeerConnectionObserverCallbacks* callbacks_borrowed,
                                   bool enable_frame_encryption,
-                                  bool enable_video_frame_event);
+                                  bool enable_video_frame_event,
+                                  bool enable_video_frame_content);
 
 RUSTEXPORT void
 Rust_deletePeerConnectionObserver(webrtc::rffi::PeerConnectionObserverRffi* observer_owned);

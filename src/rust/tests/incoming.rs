@@ -13,7 +13,7 @@ extern crate log;
 use std::time::Duration;
 
 use prost::Message;
-use ringrtc::common::{ApplicationEvent, CallId, CallState, ConnectionState};
+use ringrtc::common::{units::DataRate, ApplicationEvent, CallId, CallState, ConnectionState};
 use ringrtc::core::bandwidth_mode::BandwidthMode;
 use ringrtc::core::call_manager::MAX_MESSAGE_AGE;
 use ringrtc::core::group_call;
@@ -21,6 +21,9 @@ use ringrtc::core::signaling;
 use ringrtc::protobuf;
 use ringrtc::webrtc;
 use ringrtc::webrtc::media::MediaStream;
+use ringrtc::webrtc::peer_connection_observer::{
+    NetworkAdapterType, NetworkRoute, TransportProtocol,
+};
 
 #[macro_use]
 mod common;
@@ -457,6 +460,190 @@ fn inbound_call_drop_accepted() {
 }
 
 #[test]
+fn update_bandwidth_mode_default() {
+    test_init();
+
+    let context = connect_inbound_call();
+    let mut cm = context.cm();
+    let active_connection = context.active_connection();
+
+    assert_eq!(
+        Some(2_000_000),
+        active_connection
+            .app_connection()
+            .unwrap()
+            .max_bitrate_bps()
+    );
+
+    active_connection
+        .update_bandwidth_mode(BandwidthMode::Normal)
+        .expect(error_line!());
+
+    cm.synchronize().expect(error_line!());
+    assert_eq!(context.error_count(), 0);
+
+    assert_eq!(
+        Some(2_000_000),
+        active_connection
+            .app_connection()
+            .unwrap()
+            .max_bitrate_bps()
+    );
+
+    // It's not sent because that's what it starts as.
+    assert_eq!(
+        None,
+        active_connection
+            .app_connection()
+            .unwrap()
+            .last_sent_max_bitrate_bps()
+    )
+}
+
+#[test]
+fn update_bandwidth_mode_low() {
+    test_init();
+
+    let context = connect_inbound_call();
+    let mut cm = context.cm();
+    let active_connection = context.active_connection();
+
+    active_connection
+        .update_bandwidth_mode(BandwidthMode::Low)
+        .expect(error_line!());
+
+    cm.synchronize().expect(error_line!());
+    assert_eq!(context.error_count(), 0);
+
+    assert_eq!(
+        Some(300_000),
+        active_connection
+            .app_connection()
+            .unwrap()
+            .max_bitrate_bps()
+    );
+
+    assert_eq!(
+        Some(300_000),
+        active_connection
+            .app_connection()
+            .unwrap()
+            .last_sent_max_bitrate_bps()
+    )
+}
+
+#[test]
+fn update_bandwidth_when_relayed() {
+    test_init();
+
+    let context = connect_inbound_call();
+    let mut cm = context.cm();
+    let mut active_connection = context.active_connection();
+
+    active_connection
+        .inject_ice_network_route_changed(NetworkRoute {
+            local_adapter_type: NetworkAdapterType::Unknown,
+            local_adapter_type_under_vpn: NetworkAdapterType::Unknown,
+            local_relayed: true,
+            local_relay_protocol: TransportProtocol::Unknown,
+            remote_relayed: false,
+        })
+        .unwrap();
+    cm.synchronize().expect(error_line!());
+    assert_eq!(context.error_count(), 0);
+
+    assert_eq!(
+        Some(1_000_000),
+        active_connection
+            .app_connection()
+            .unwrap()
+            .max_bitrate_bps()
+    );
+
+    assert_eq!(
+        None,
+        active_connection
+            .app_connection()
+            .unwrap()
+            .last_sent_max_bitrate_bps()
+    );
+
+    active_connection
+        .update_bandwidth_mode(BandwidthMode::Low)
+        .expect(error_line!());
+    cm.synchronize().expect(error_line!());
+    assert_eq!(context.error_count(), 0);
+
+    assert_eq!(
+        Some(300_000),
+        active_connection
+            .app_connection()
+            .unwrap()
+            .max_bitrate_bps()
+    );
+
+    assert_eq!(
+        Some(300_000),
+        active_connection
+            .app_connection()
+            .unwrap()
+            .last_sent_max_bitrate_bps()
+    );
+
+    active_connection
+        .update_bandwidth_mode(BandwidthMode::Normal)
+        .expect(error_line!());
+    cm.synchronize().expect(error_line!());
+    assert_eq!(context.error_count(), 0);
+
+    assert_eq!(
+        Some(1_000_000),
+        active_connection
+            .app_connection()
+            .unwrap()
+            .max_bitrate_bps()
+    );
+
+    // Even though we limit what we *send* when using TURN, we don't
+    // limit what we *request to be sent to us*.
+    assert_eq!(
+        Some(2_000_000),
+        active_connection
+            .app_connection()
+            .unwrap()
+            .last_sent_max_bitrate_bps()
+    );
+
+    active_connection
+        .inject_ice_network_route_changed(NetworkRoute {
+            local_adapter_type: NetworkAdapterType::Unknown,
+            local_adapter_type_under_vpn: NetworkAdapterType::Unknown,
+            local_relayed: false,
+            local_relay_protocol: TransportProtocol::Unknown,
+            remote_relayed: false,
+        })
+        .unwrap();
+    cm.synchronize().expect(error_line!());
+    assert_eq!(context.error_count(), 0);
+
+    assert_eq!(
+        Some(2_000_000),
+        active_connection
+            .app_connection()
+            .unwrap()
+            .max_bitrate_bps()
+    );
+
+    assert_eq!(
+        Some(2_000_000),
+        active_connection
+            .app_connection()
+            .unwrap()
+            .last_sent_max_bitrate_bps()
+    );
+}
+
+#[test]
 fn start_inbound_call_with_error() {
     test_init();
 
@@ -640,6 +827,487 @@ fn receive_expired_offer_after_age_limit() {
     assert_eq!(context.error_count(), 0);
     assert_eq!(context.offer_expired_count(), 1);
     assert!(!cm.busy());
+}
+
+#[test]
+fn offer_after_ice() {
+    // We don't actually expose a way to automatically test that the ICE candidates are handled.
+    // You can check manually by running with RUST_LOG=ringrtc::core::connection/ice_candidates
+    test_init();
+
+    let context = TestContext::new();
+    let mut cm = context.cm();
+
+    let remote_peer = format!("REMOTE_PEER-{}", context.prng.gen::<u16>());
+    let call_id = CallId::new(context.prng.gen::<u64>());
+
+    cm.received_ice(call_id, random_received_ice_candidate(&context.prng))
+        .expect(error_line!());
+    cm.received_ice(call_id, random_received_ice_candidate(&context.prng))
+        .expect(error_line!());
+
+    cm.received_offer(
+        remote_peer,
+        call_id,
+        random_received_offer(&context.prng, Duration::from_secs(0)),
+    )
+    .expect(error_line!());
+
+    cm.synchronize().expect(error_line!());
+
+    assert!(cm.active_call().is_ok());
+    assert_eq!(context.start_outgoing_count(), 0);
+    assert_eq!(context.start_incoming_count(), 1);
+
+    let active_call = context.active_call();
+    assert_eq!(
+        active_call.state().expect(error_line!()),
+        CallState::WaitingToProceed
+    );
+
+    cm.proceed(
+        active_call.call_id(),
+        format!("CONTEXT-{}", context.prng.gen::<u16>()),
+        BandwidthMode::Normal,
+        None,
+    )
+    .expect(error_line!());
+
+    cm.synchronize().expect(error_line!());
+
+    let connection = active_call.get_connection(1).expect(error_line!());
+
+    cm.synchronize().expect(error_line!());
+    assert_eq!(
+        connection.state().expect(error_line!()),
+        ConnectionState::ConnectingBeforeAccepted
+    );
+
+    assert_eq!(context.answers_sent(), 1);
+    assert_eq!(
+        active_call.state().expect(error_line!()),
+        CallState::ConnectingBeforeAccepted
+    );
+    assert_eq!(context.error_count(), 0);
+    assert_eq!(context.ended_count(), 0);
+    assert!(cm.busy());
+}
+
+#[test]
+fn offer_after_unrelated_ice() {
+    // We don't actually expose a way to automatically test that the ICE candidates are handled.
+    // You can check manually by running with RUST_LOG=ringrtc::core::connection/ice_candidates
+    test_init();
+
+    let context = TestContext::new();
+    let mut cm = context.cm();
+
+    let remote_peer = format!("REMOTE_PEER-{}", context.prng.gen::<u16>());
+    let call_id = CallId::new(context.prng.gen::<u64>());
+    let other_call_id = CallId::new(context.prng.gen::<u64>());
+
+    cm.received_ice(other_call_id, random_received_ice_candidate(&context.prng))
+        .expect(error_line!());
+    cm.received_ice(other_call_id, random_received_ice_candidate(&context.prng))
+        .expect(error_line!());
+
+    cm.received_offer(
+        remote_peer,
+        call_id,
+        random_received_offer(&context.prng, Duration::from_secs(0)),
+    )
+    .expect(error_line!());
+
+    cm.synchronize().expect(error_line!());
+
+    assert!(cm.active_call().is_ok());
+    assert_eq!(context.start_outgoing_count(), 0);
+    assert_eq!(context.start_incoming_count(), 1);
+
+    let active_call = context.active_call();
+    assert_eq!(
+        active_call.state().expect(error_line!()),
+        CallState::WaitingToProceed
+    );
+
+    cm.proceed(
+        active_call.call_id(),
+        format!("CONTEXT-{}", context.prng.gen::<u16>()),
+        BandwidthMode::Normal,
+        None,
+    )
+    .expect(error_line!());
+
+    cm.synchronize().expect(error_line!());
+
+    let connection = active_call.get_connection(1).expect(error_line!());
+
+    cm.synchronize().expect(error_line!());
+    assert_eq!(
+        connection.state().expect(error_line!()),
+        ConnectionState::ConnectingBeforeAccepted
+    );
+
+    assert_eq!(context.answers_sent(), 1);
+    assert_eq!(
+        active_call.state().expect(error_line!()),
+        CallState::ConnectingBeforeAccepted
+    );
+    assert_eq!(context.error_count(), 0);
+    assert_eq!(context.ended_count(), 0);
+    assert!(cm.busy());
+}
+
+#[test]
+fn offer_after_hangup() {
+    test_init();
+
+    let context = TestContext::new();
+    let mut cm = context.cm();
+
+    let remote_peer = format!("REMOTE_PEER-{}", context.prng.gen::<u16>());
+    let call_id = CallId::new(context.prng.gen::<u64>());
+
+    cm.received_hangup(
+        call_id,
+        signaling::ReceivedHangup {
+            sender_device_id: 1,
+            hangup: signaling::Hangup::Normal,
+        },
+    )
+    .expect(error_line!());
+
+    cm.received_offer(
+        remote_peer,
+        call_id,
+        random_received_offer(&context.prng, Duration::from_secs(0)),
+    )
+    .expect(error_line!());
+
+    cm.synchronize().expect(error_line!());
+
+    cm.proceed(
+        call_id,
+        format!("CONTEXT-{}", context.prng.gen::<u16>()),
+        BandwidthMode::Normal,
+        None,
+    )
+    .expect(error_line!());
+
+    cm.synchronize().expect(error_line!());
+
+    assert_eq!(context.error_count(), 0);
+    assert!(!cm.busy());
+    assert_eq!(context.ended_count(), 1);
+    assert_eq!(context.answers_sent(), 0);
+}
+
+#[test]
+fn offer_after_unrelated_hangup() {
+    test_init();
+
+    let context = TestContext::new();
+    let mut cm = context.cm();
+
+    let remote_peer = format!("REMOTE_PEER-{}", context.prng.gen::<u16>());
+    let call_id = CallId::new(context.prng.gen::<u64>());
+    let unrelated_call_id = CallId::new(context.prng.gen::<u64>());
+
+    cm.received_hangup(
+        unrelated_call_id,
+        signaling::ReceivedHangup {
+            sender_device_id: 1,
+            hangup: signaling::Hangup::Normal,
+        },
+    )
+    .expect(error_line!());
+
+    cm.received_offer(
+        remote_peer,
+        call_id,
+        random_received_offer(&context.prng, Duration::from_secs(0)),
+    )
+    .expect(error_line!());
+
+    cm.synchronize().expect(error_line!());
+
+    cm.proceed(
+        call_id,
+        format!("CONTEXT-{}", context.prng.gen::<u16>()),
+        BandwidthMode::Normal,
+        None,
+    )
+    .expect(error_line!());
+
+    cm.synchronize().expect(error_line!());
+
+    assert_eq!(context.error_count(), 0);
+    assert!(cm.busy());
+    assert_eq!(context.ended_count(), 0);
+    assert_eq!(context.answers_sent(), 1);
+}
+
+#[test]
+fn offer_after_ice_and_hangup() {
+    test_init();
+
+    let context = TestContext::new();
+    let mut cm = context.cm();
+
+    let remote_peer = format!("REMOTE_PEER-{}", context.prng.gen::<u16>());
+    let call_id = CallId::new(context.prng.gen::<u64>());
+
+    cm.received_ice(call_id, random_received_ice_candidate(&context.prng))
+        .expect(error_line!());
+    cm.received_hangup(
+        call_id,
+        signaling::ReceivedHangup {
+            sender_device_id: 1,
+            hangup: signaling::Hangup::Normal,
+        },
+    )
+    .expect(error_line!());
+
+    cm.received_offer(
+        remote_peer,
+        call_id,
+        random_received_offer(&context.prng, Duration::from_secs(0)),
+    )
+    .expect(error_line!());
+
+    cm.synchronize().expect(error_line!());
+
+    cm.proceed(
+        call_id,
+        format!("CONTEXT-{}", context.prng.gen::<u16>()),
+        BandwidthMode::Normal,
+        None,
+    )
+    .expect(error_line!());
+
+    cm.synchronize().expect(error_line!());
+
+    assert_eq!(context.error_count(), 0);
+    assert!(!cm.busy());
+    assert_eq!(context.ended_count(), 1);
+    assert_eq!(context.answers_sent(), 0);
+}
+
+#[test]
+fn offer_after_hangup_and_ice() {
+    test_init();
+
+    let context = TestContext::new();
+    let mut cm = context.cm();
+
+    let remote_peer = format!("REMOTE_PEER-{}", context.prng.gen::<u16>());
+    let call_id = CallId::new(context.prng.gen::<u64>());
+
+    cm.received_hangup(
+        call_id,
+        signaling::ReceivedHangup {
+            sender_device_id: 1,
+            hangup: signaling::Hangup::Normal,
+        },
+    )
+    .expect(error_line!());
+    cm.received_ice(call_id, random_received_ice_candidate(&context.prng))
+        .expect(error_line!());
+
+    cm.received_offer(
+        remote_peer,
+        call_id,
+        random_received_offer(&context.prng, Duration::from_secs(0)),
+    )
+    .expect(error_line!());
+
+    cm.synchronize().expect(error_line!());
+
+    cm.proceed(
+        call_id,
+        format!("CONTEXT-{}", context.prng.gen::<u16>()),
+        BandwidthMode::Normal,
+        None,
+    )
+    .expect(error_line!());
+
+    cm.synchronize().expect(error_line!());
+
+    assert_eq!(context.error_count(), 0);
+    assert!(!cm.busy());
+    assert_eq!(context.ended_count(), 1);
+    assert_eq!(context.answers_sent(), 0);
+}
+
+#[test]
+fn offer_after_hangup_with_intervening_ice_for_other_call() {
+    test_init();
+
+    let context = TestContext::new();
+    let mut cm = context.cm();
+
+    let remote_peer = format!("REMOTE_PEER-{}", context.prng.gen::<u16>());
+    let call_id = CallId::new(context.prng.gen::<u64>());
+    let unrelated_call_id = CallId::new(context.prng.gen::<u64>());
+
+    cm.received_hangup(
+        call_id,
+        signaling::ReceivedHangup {
+            sender_device_id: 1,
+            hangup: signaling::Hangup::Normal,
+        },
+    )
+    .expect(error_line!());
+    cm.received_ice(
+        unrelated_call_id,
+        random_received_ice_candidate(&context.prng),
+    )
+    .expect(error_line!());
+
+    cm.received_offer(
+        remote_peer,
+        call_id,
+        random_received_offer(&context.prng, Duration::from_secs(0)),
+    )
+    .expect(error_line!());
+
+    cm.synchronize().expect(error_line!());
+
+    cm.proceed(
+        call_id,
+        format!("CONTEXT-{}", context.prng.gen::<u16>()),
+        BandwidthMode::Normal,
+        None,
+    )
+    .expect(error_line!());
+
+    cm.synchronize().expect(error_line!());
+
+    assert_eq!(context.error_count(), 0);
+    assert!(cm.busy());
+    assert_eq!(context.ended_count(), 0);
+    assert_eq!(context.answers_sent(), 1);
+}
+
+#[test]
+fn offer_after_hangup_with_intervening_hangup_for_other_call() {
+    test_init();
+
+    let context = TestContext::new();
+    let mut cm = context.cm();
+
+    let remote_peer = format!("REMOTE_PEER-{}", context.prng.gen::<u16>());
+    let call_id = CallId::new(context.prng.gen::<u64>());
+    let unrelated_call_id = CallId::new(context.prng.gen::<u64>());
+
+    cm.received_hangup(
+        call_id,
+        signaling::ReceivedHangup {
+            sender_device_id: 1,
+            hangup: signaling::Hangup::Normal,
+        },
+    )
+    .expect(error_line!());
+    cm.received_hangup(
+        unrelated_call_id,
+        signaling::ReceivedHangup {
+            sender_device_id: 1,
+            hangup: signaling::Hangup::Normal,
+        },
+    )
+    .expect(error_line!());
+
+    cm.received_offer(
+        remote_peer,
+        call_id,
+        random_received_offer(&context.prng, Duration::from_secs(0)),
+    )
+    .expect(error_line!());
+
+    cm.synchronize().expect(error_line!());
+
+    cm.proceed(
+        call_id,
+        format!("CONTEXT-{}", context.prng.gen::<u16>()),
+        BandwidthMode::Normal,
+        None,
+    )
+    .expect(error_line!());
+
+    cm.synchronize().expect(error_line!());
+
+    assert_eq!(context.error_count(), 0);
+    assert!(cm.busy());
+    assert_eq!(context.ended_count(), 0);
+    assert_eq!(context.answers_sent(), 1);
+}
+
+#[test]
+fn offer_after_ice_with_previous_ice_for_other_call() {
+    // We don't actually expose a way to automatically test that the ICE candidates are handled.
+    // You can check manually by running with RUST_LOG=ringrtc::core::connection/ice_candidates
+    test_init();
+
+    let context = TestContext::new();
+    let mut cm = context.cm();
+
+    let remote_peer = format!("REMOTE_PEER-{}", context.prng.gen::<u16>());
+    let call_id = CallId::new(context.prng.gen::<u64>());
+    let unrelated_call_id = CallId::new(context.prng.gen::<u64>());
+
+    cm.received_ice(
+        unrelated_call_id,
+        random_received_ice_candidate(&context.prng),
+    )
+    .expect(error_line!());
+    cm.received_ice(call_id, random_received_ice_candidate(&context.prng))
+        .expect(error_line!());
+
+    cm.received_offer(
+        remote_peer,
+        call_id,
+        random_received_offer(&context.prng, Duration::from_secs(0)),
+    )
+    .expect(error_line!());
+
+    cm.synchronize().expect(error_line!());
+
+    assert!(cm.active_call().is_ok());
+    assert_eq!(context.start_outgoing_count(), 0);
+    assert_eq!(context.start_incoming_count(), 1);
+
+    let active_call = context.active_call();
+    assert_eq!(
+        active_call.state().expect(error_line!()),
+        CallState::WaitingToProceed
+    );
+
+    cm.proceed(
+        active_call.call_id(),
+        format!("CONTEXT-{}", context.prng.gen::<u16>()),
+        BandwidthMode::Normal,
+        None,
+    )
+    .expect(error_line!());
+
+    cm.synchronize().expect(error_line!());
+
+    let connection = active_call.get_connection(1).expect(error_line!());
+
+    cm.synchronize().expect(error_line!());
+    assert_eq!(
+        connection.state().expect(error_line!()),
+        ConnectionState::ConnectingBeforeAccepted
+    );
+
+    assert_eq!(context.answers_sent(), 1);
+    assert_eq!(
+        active_call.state().expect(error_line!()),
+        CallState::ConnectingBeforeAccepted
+    );
+    assert_eq!(context.error_count(), 0);
+    assert_eq!(context.ended_count(), 0);
+    assert!(cm.busy());
 }
 
 // Two users are in an accepted call. The remote user's leg is ended and they
@@ -1143,5 +1811,66 @@ fn group_call_ring_timeout() {
     assert_eq!(
         &[] as &[ringrtc::sim::sim_platform::OutgoingCallMessage],
         &messages[..]
+    );
+}
+
+#[test]
+fn received_status_before_accepted() {
+    let context = start_inbound_call();
+    let mut cm = context.cm();
+    let active_call = context.active_call();
+    let mut active_connection = context.active_connection();
+
+    active_connection
+        .inject_ice_connected()
+        .expect(error_line!());
+
+    active_connection
+        .handle_received_incoming_media(MediaStream::new(webrtc::Arc::null()))
+        .expect(error_line!());
+
+    active_connection
+        .inject_received_sender_status_via_rtp_data(
+            active_call.call_id(),
+            signaling::SenderStatus {
+                video_enabled: Some(true),
+                sharing_screen: None,
+            },
+            1,
+        )
+        .expect(error_line!());
+
+    active_connection
+        .inject_received_receiver_status_via_rtp_data(
+            active_call.call_id(),
+            DataRate::from_bps(50_000),
+            1,
+        )
+        .expect(error_line!());
+
+    cm.synchronize().expect(error_line!());
+
+    assert_eq!(context.event_count(ApplicationEvent::RemoteVideoEnable), 0);
+
+    assert_eq!(
+        Some(2_000_000),
+        active_connection
+            .app_connection()
+            .unwrap()
+            .max_bitrate_bps()
+    );
+
+    cm.accept_call(active_call.call_id()).expect(error_line!());
+
+    cm.synchronize().expect(error_line!());
+
+    assert_eq!(context.event_count(ApplicationEvent::RemoteVideoEnable), 1);
+
+    assert_eq!(
+        Some(50_000),
+        active_connection
+            .app_connection()
+            .unwrap()
+            .max_bitrate_bps()
     );
 }

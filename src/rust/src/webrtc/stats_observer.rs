@@ -5,7 +5,7 @@
 
 //! WebRTC Create Session Description
 
-use std::slice;
+use std::{borrow::Cow, slice};
 
 use crate::webrtc;
 
@@ -46,7 +46,8 @@ impl StatsObserver {
                 remote_jitter,\
                 remote_round_trip_time,\
                 audio_level,\
-                total_audio_energy"
+                total_audio_energy,\
+                echo_likelihood"
         );
         info!(
             "ringrtc_stats!,\
@@ -133,7 +134,7 @@ impl StatsObserver {
             };
             for audio_sender in audio_senders.iter() {
                 info!(
-                    "ringrtc_stats!,audio,send,{},{},{},{},{:.5},{:.3},{:.5},{:.3}",
+                    "ringrtc_stats!,audio,send,{},{},{},{},{:.5},{:.3},{:.5},{:.3},{:.3}",
                     audio_sender.ssrc,
                     audio_sender.packets_sent,
                     audio_sender.bytes_sent,
@@ -142,6 +143,7 @@ impl StatsObserver {
                     audio_sender.remote_round_trip_time,
                     audio_sender.audio_level,
                     audio_sender.total_audio_energy,
+                    audio_sender.echo_likelihood,
                 );
             }
         }
@@ -173,7 +175,7 @@ impl StatsObserver {
                       video_sender.nack_count,
                       video_sender.fir_count,
                       video_sender.pli_count,
-                      video_sender.quality_limitation_reason,
+                      video_sender.quality_limitation_reason_description(),
                       video_sender.quality_limitation_resolution_changes,
                       video_sender.remote_packets_lost,
                       video_sender.remote_jitter,
@@ -260,6 +262,7 @@ pub struct AudioSenderStatistics {
     pub remote_round_trip_time: f64,
     pub audio_level: f64,
     pub total_audio_energy: f64,
+    pub echo_likelihood: f64,
 }
 
 #[repr(C)]
@@ -284,6 +287,19 @@ pub struct VideoSenderStatistics {
     pub remote_packets_lost: i32,
     pub remote_jitter: f64,
     pub remote_round_trip_time: f64,
+}
+
+impl VideoSenderStatistics {
+    fn quality_limitation_reason_description(&self) -> Cow<'static, str> {
+        // See https://w3c.github.io/webrtc-stats/#rtcqualitylimitationreason-enum.
+        match self.quality_limitation_reason {
+            0 => "none".into(),
+            1 => "cpu".into(),
+            2 => "bandwidth".into(),
+            3 => "other".into(),
+            x => x.to_string().into(),
+        }
+    }
 }
 
 #[repr(C)]

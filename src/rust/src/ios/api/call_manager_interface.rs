@@ -231,6 +231,7 @@ pub struct AppRemoteDeviceState {
     pub addedTime: u64,   // unix millis
     pub speakerTime: u64, // unix millis; 0 if never was a speaker
     pub forwardingVideo: AppOptionalBool,
+    pub isHigherResolutionPending: bool,
 }
 
 #[repr(C)]
@@ -1158,6 +1159,7 @@ pub extern "C" fn ringrtcRequestVideo(
     callManager: *mut c_void,
     clientId: group_call::ClientId,
     appVideoRequestArray: *const AppVideoRequestArray,
+    activeSpeakerHeight: u16,
 ) {
     info!("ringrtcRequestVideo():");
 
@@ -1186,6 +1188,7 @@ pub extern "C" fn ringrtcRequestVideo(
         callManager as *mut IosCallManager,
         clientId,
         rendered_resolutions,
+        activeSpeakerHeight,
     );
     if result.is_err() {
         error!("{:?}", result.err());

@@ -1,7 +1,7 @@
 #!/bin/sh
 
 #
-# Copyright 2019-2021 Signal Messenger, LLC
+# Copyright 2022 Signal Messenger, LLC
 # SPDX-License-Identifier: AGPL-3.0-only
 #
 
@@ -12,7 +12,7 @@ set -e
 
 usage()
 {
-    echo 'usage: build-cli [-d|-r|-c]
+    echo 'usage: build-gctc [-d|-r|-c]
     where:
         -d to create a debug build (default)
         -r to create a release build
@@ -60,7 +60,7 @@ get_default_platform()
 {
     hash rustup 2>/dev/null || { echo >&2 "Make sure you have rustup installed and properly configured! Aborting."; exit 1; }
 
-    case "$(rustup show active-toolchain)" in 
+    case "$(rustup show active-toolchain)" in
         *"x86_64-apple-darwin"* | *"aarch64-apple-darwin"* )
             echo "darwin"
             ;;
@@ -87,7 +87,7 @@ export MACOSX_DEPLOYMENT_TARGET="10.10"
 # Build WebRTC.
 (
     cd src/webrtc/src
-    WEBRTC_ARGS="rtc_build_examples=false rtc_build_tools=false rtc_include_tests=false rtc_enable_protobuf=false rtc_use_x11=false rtc_enable_sctp=false rtc_libvpx_build_vp9=true rtc_include_ilbc=false"
+    WEBRTC_ARGS="rtc_build_examples=false rtc_build_tools=false rtc_include_tests=false rtc_enable_protobuf=false rtc_use_x11=false rtc_enable_sctp=false rtc_libvpx_build_vp9=false rtc_include_ilbc=false"
 
     if [ "${BUILD_TYPE}" = "debug" ]
     then
@@ -109,14 +109,14 @@ export MACOSX_DEPLOYMENT_TARGET="10.10"
         # TODO: Figure out why and fix this
         rm -f target/debug/deps/libringrtc.rlib
 
-        OUTPUT_DIR="${OUTPUT_DIR}" cargo build --bin cli --features=native,simnet
-        echo "Can run with src/rust/target/debug/cli"
+        OUTPUT_DIR="${OUTPUT_DIR}" cargo build --bin gctc --features=native,http
+        echo "Can run with src/rust/target/debug/gctc"
     else
         # HACK: IF we don't remove this file, changes to rffi code will not make it into the binary.
         # TODO: Figure out why and fix this
         rm -f target/release/deps/libringrtc.rlib
 
-        OUTPUT_DIR="${OUTPUT_DIR}" cargo build --bin cli --features=native,simnet --release
-        echo "Can run with src/rust/target/release/cli"
+        OUTPUT_DIR="${OUTPUT_DIR}" cargo build --bin gctc --features=native,http --release
+        echo "Can run with src/rust/target/release/gctc"
     fi
 )

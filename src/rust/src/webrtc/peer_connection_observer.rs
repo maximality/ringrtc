@@ -40,11 +40,24 @@ pub enum IceConnectionState {
     Max,
 }
 
+/// Stays in sync with the C++ value in rffi_defs.h.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TransportProtocol {
+    Udp,
+    Tcp,
+    Tls,
+    Unknown,
+}
+
 /// Ice Candidate structure passed between Rust and C++.
 #[repr(C)]
 #[derive(Debug)]
 pub struct CppIceCandidate {
     sdp: webrtc::ptr::Borrowed<c_char>,
+    is_relayed: bool,
+    // Will be Unknown if !is_relayed, but may be Unknown for other reasons, so don't use that to check.
+    relay_protocol: TransportProtocol,
 }
 
 /// Rust version of WebRTC AdapterType
@@ -82,14 +95,10 @@ pub enum NetworkAdapterType {
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct NetworkRoute {
     pub local_adapter_type: NetworkAdapterType,
-}
-
-impl Default for NetworkRoute {
-    fn default() -> Self {
-        Self {
-            local_adapter_type: NetworkAdapterType::Unknown,
-        }
-    }
+    pub local_adapter_type_under_vpn: NetworkAdapterType,
+    pub local_relayed: bool,
+    pub local_relay_protocol: TransportProtocol,
+    pub remote_relayed: bool,
 }
 
 /// The callbacks from C++ will ultimately go to an impl of this.
@@ -102,6 +111,7 @@ pub trait PeerConnectionObserverTrait {
         &mut self,
         ice_candidate: signaling::IceCandidate,
         sdp_for_logging: &str,
+        relay_protocol: Option<webrtc::peer_connection_observer::TransportProtocol>,
     ) -> Result<()>;
     fn handle_ice_candidates_removed(&mut self, removed_addresses: Vec<SocketAddr>) -> Result<()>;
     fn handle_ice_connection_state_changed(&mut self, new_state: IceConnectionState) -> Result<()>;
@@ -122,7 +132,8 @@ pub trait PeerConnectionObserverTrait {
     fn handle_incoming_video_frame(
         &mut self,
         _track_id: u32,
-        _video_frame: VideoFrame,
+        _video_frame_metadata: VideoFrameMetadata,
+        _video_frame: Option<VideoFrame>,
     ) -> Result<()> {
         Ok(())
     }
@@ -189,9 +200,14 @@ extern "C" fn pc_observer_OnIceCandidate<T>(
             };
             // ICE candidates are the same for V2 and V3 and V4.
             let ice_candidate = signaling::IceCandidate::from_v3_sdp(sdp.clone());
+            let relay_protocol = if cpp_candidate.is_relayed {
+                Some(cpp_candidate.relay_protocol)
+            } else {
+                None
+            };
             if let Ok(ice_candidate) = ice_candidate {
                 observer
-                    .handle_ice_candidate_gathered(ice_candidate, sdp.as_str())
+                    .handle_ice_candidate_gathered(ice_candidate, sdp.as_str(), relay_protocol)
                     .unwrap_or_else(|e| error!("Problems handling ice candidate: {}", e));
             } else {
                 warn!("Failed to handle local ICE candidate SDP");
@@ -384,9 +400,16 @@ extern "C" fn pc_observer_OnVideoFrame<T>(
     if let Some(observer) = unsafe { observer.as_mut() } {
         debug!("pc_observer_OnVideoFrame(): track_id: {}", track_id,);
         // TODO: Figure out how to pass in a PeerConnection as an owner.
-        let frame = VideoFrame::from_buffer(metadata, webrtc::Arc::from_owned(rffi_buffer));
+        let frame = if !rffi_buffer.is_null() {
+            Some(VideoFrame::from_buffer(
+                metadata,
+                webrtc::Arc::from_owned(rffi_buffer),
+            ))
+        } else {
+            None
+        };
         observer
-            .handle_incoming_video_frame(track_id, frame)
+            .handle_incoming_video_frame(track_id, metadata, frame)
             .unwrap_or_else(|e| error!("Problems handling incoming video frame: {}", e));
     } else {
         error!("pc_observer_OnVideoFrame called with null observer");
@@ -661,6 +684,7 @@ where
         observer: webrtc::ptr::Borrowed<T>,
         enable_frame_encryption: bool,
         enable_video_frame_event: bool,
+        enable_video_frame_content: bool,
     ) -> Result<Self> {
         debug!(
             "create_pc_observer(): observer_ptr: {:p}",
@@ -703,6 +727,7 @@ where
                 webrtc::ptr::Borrowed::from_ptr(pc_observer_callbacks_ptr).to_void(),
                 enable_frame_encryption,
                 enable_video_frame_event,
+                enable_video_frame_content,
             )
         });
 

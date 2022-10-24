@@ -379,6 +379,11 @@ public class CallManager {
     checkCallManagerExists();
 
     Log.i(TAG, "proceed(): callId: " + callId + ", hideIp: " + hideIp);
+    for (PeerConnection.IceServer iceServer : iceServers) {
+      for (String url : iceServer.urls) {
+        Log.i(TAG, "  server: " + url);
+      }
+    }
 
     PeerConnectionFactory factory = this.createPeerConnectionFactory(eglBase, audioProcessingMethod);
 
@@ -729,25 +734,6 @@ public class CallManager {
 
   /**
    *
-   * Notification from application to enable audio playback of remote
-   * audio stream and enable recording of local audio stream.
-   *
-   * @throws CallException for native code failures
-   *
-   */
-  public void setCommunicationMode()
-    throws CallException
-  {
-    checkCallManagerExists();
-
-    Connection connection = ringrtcGetActiveConnection(nativeCallManager);
-    connection.setAudioPlayout(true);
-    connection.setAudioRecording(true);
-
-  }
-
-  /**
-   *
    * Notification from application to enable/disable local audio
    * recording and transmission.
    *
@@ -761,7 +747,6 @@ public class CallManager {
   {
     checkCallManagerExists();
 
-    Log.i(TAG, "#outgoing_audio_enabled: " + enable);
     Connection connection = ringrtcGetActiveConnection(nativeCallManager);
     connection.setAudioEnabled(enable);
   }
@@ -979,6 +964,7 @@ public class CallManager {
     MediaConstraints                constraints   = new MediaConstraints();
     PeerConnection.RTCConfiguration configuration = new PeerConnection.RTCConfiguration(callContext.iceServers);
 
+    configuration.sdpSemantics  = PeerConnection.SdpSemantics.PLAN_B;
     configuration.bundlePolicy  = PeerConnection.BundlePolicy.MAXBUNDLE;
     configuration.rtcpMuxPolicy = PeerConnection.RtcpMuxPolicy.REQUIRE;
     configuration.tcpCandidatePolicy = PeerConnection.TcpCandidatePolicy.DISABLED;
@@ -987,7 +973,6 @@ public class CallManager {
     if (callContext.hideIp) {
       configuration.iceTransportsType = PeerConnection.IceTransportsType.RELAY;
     }
-    configuration.enableDtlsSrtp = false;
 
     PeerConnectionFactory factory       = callContext.factory;
     CameraControl         cameraControl = callContext.cameraControl;
@@ -1312,8 +1297,6 @@ public class CallManager {
 
   @CalledByNative
   private void handleAudioLevels(long clientId, int capturedLevel, List<GroupCall.ReceivedAudioLevel> receivedLevels) {
-    Log.d(TAG, "handleAudioLevels():");
-
     GroupCall groupCall = this.groupCallByClientId.get(clientId);
     if (groupCall == null) {
       Log.w(TAG, "groupCall not found by clientId: " + clientId);

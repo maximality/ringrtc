@@ -419,6 +419,7 @@ impl Platform for NativePlatform {
             connection.get_connection_ptr()?,
             false, /* enable_frame_encryption */
             true,  /* enable_video_frame_event */
+            true,  /* enable_video_frame_content */
         )?;
         let pc = self.peer_connection_factory.create_peer_connection(
             pc_observer,
@@ -599,7 +600,7 @@ impl Platform for NativePlatform {
         remote_peer: &Self::AppRemotePeer,
         network_route: NetworkRoute,
     ) -> Result<()> {
-        info!(
+        trace!(
             "NativePlatform::on_network_route_changed(): {:?}",
             network_route
         );
@@ -818,7 +819,7 @@ impl Platform for NativePlatform {
         network_route: NetworkRoute,
     ) {
         info!(
-            "NativePlatformhandle_network_route_changed(): {:?}",
+            "NativePlatform::handle_network_route_changed(): {:?}",
             network_route
         );
         let result =

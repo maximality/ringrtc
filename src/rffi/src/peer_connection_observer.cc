@@ -15,8 +15,9 @@ namespace rffi {
 PeerConnectionObserverRffi::PeerConnectionObserverRffi(void* observer,
                                                        const PeerConnectionObserverCallbacks* callbacks,
                                                        bool enable_frame_encryption,
-                                                       bool enable_video_frame_event)
-  : observer_(observer), callbacks_(*callbacks), enable_frame_encryption_(enable_frame_encryption), enable_video_frame_event_(enable_video_frame_event)
+                                                       bool enable_video_frame_event,
+                                                       bool enable_video_frame_content)
+  : observer_(observer), callbacks_(*callbacks), enable_frame_encryption_(enable_frame_encryption), enable_video_frame_event_(enable_video_frame_event), enable_video_frame_content_(enable_video_frame_content)
 {
   RTC_LOG(LS_INFO) << "PeerConnectionObserverRffi:ctor(): " << this->observer_;
 }
@@ -32,8 +33,17 @@ void PeerConnectionObserverRffi::OnIceCandidate(const IceCandidateInterface* can
   candidate->ToString(&sdp);
   rust_candidate.sdp_borrowed = sdp.c_str();
 
-  callbacks_.onIceCandidate(observer_, &rust_candidate);
+  rust_candidate.is_relayed = (candidate->candidate().type() == cricket::RELAY_PORT_TYPE);
+  rust_candidate.relay_protocol = TransportProtocol::kUnknown;
+  if (candidate->candidate().relay_protocol() == cricket::UDP_PROTOCOL_NAME) {
+    rust_candidate.relay_protocol = TransportProtocol::kUdp;
+  } else if (candidate->candidate().relay_protocol() == cricket::TCP_PROTOCOL_NAME) {
+    rust_candidate.relay_protocol = TransportProtocol::kTcp;
+  } else if (candidate->candidate().relay_protocol() == cricket::TLS_PROTOCOL_NAME) {
+    rust_candidate.relay_protocol = TransportProtocol::kTls;
+  }
 
+  callbacks_.onIceCandidate(observer_, &rust_candidate);
 }
 
 void PeerConnectionObserverRffi::OnIceCandidatesRemoved(
@@ -45,6 +55,19 @@ void PeerConnectionObserverRffi::OnIceCandidatesRemoved(
   }
 
   callbacks_.onIceCandidatesRemoved(observer_, removed_addresses.data(), removed_addresses.size());
+}
+
+void PeerConnectionObserverRffi::OnIceCandidateError(
+    const std::string& address,
+    int port,
+    const std::string& url,
+    int error_code,
+    const std::string& error_text) {
+  // Error code 701 is when we have an IPv4 local port trying to reach an IPv6 server or vice versa.
+  // That's expected to not work, so we don't want to log that all the time.
+  if (error_code != 701) {
+    RTC_LOG(LS_WARNING) << "Failed to gather local ICE candidate from " << address << ":"  << port <<  " to " << url << "; error " << error_code << ": " << error_text;
+  }
 }
 
 void PeerConnectionObserverRffi::OnSignalingChange(
@@ -66,8 +89,21 @@ void PeerConnectionObserverRffi::OnIceConnectionReceivingChange(bool receiving) 
 
 void PeerConnectionObserverRffi::OnIceSelectedCandidatePairChanged(
     const cricket::CandidatePairChangeEvent& event) {
-  auto local_adapter_type = event.selected_candidate_pair.local_candidate().network_type();
-  auto network_route = webrtc::rffi::NetworkRoute{ local_adapter_type, };
+  auto& local = event.selected_candidate_pair.local_candidate();
+  auto& remote = event.selected_candidate_pair.remote_candidate();
+  auto local_adapter_type = local.network_type();
+  auto local_adapter_type_under_vpn = local.underlying_type_for_vpn();
+  bool local_relayed = (local.type() == cricket::RELAY_PORT_TYPE) || !local.relay_protocol().empty();
+  TransportProtocol local_relay_protocol = TransportProtocol::kUnknown;
+  if (local.relay_protocol() == cricket::UDP_PROTOCOL_NAME) {
+    local_relay_protocol = TransportProtocol::kUdp;
+  } else if (local.relay_protocol() == cricket::TCP_PROTOCOL_NAME) {
+    local_relay_protocol = TransportProtocol::kTcp;
+  } else if (local.relay_protocol() == cricket::TLS_PROTOCOL_NAME) {
+    local_relay_protocol = TransportProtocol::kTls;
+  }
+  bool remote_relayed = (remote.type() == cricket::RELAY_PORT_TYPE);
+  auto network_route = webrtc::rffi::NetworkRoute{ local_adapter_type, local_adapter_type_under_vpn, local_relayed, local_relay_protocol, remote_relayed};
   callbacks_.onIceNetworkRouteChange(observer_, network_route);
 }
 
@@ -196,7 +232,7 @@ rtc::scoped_refptr<FrameEncryptorInterface> PeerConnectionObserverRffi::CreateEn
   // The PeerConnectionObserverRffi outlives the Encryptor because it outlives the PeerConnection,
   // which outlives the RtpSender, which owns the Encryptor.
   // So we know the PeerConnectionObserverRffi outlives the Encryptor.
-  return new rtc::RefCountedObject<Encryptor>(observer_, &callbacks_);
+  return rtc::make_ref_counted<Encryptor>(observer_, &callbacks_);
 }
 
 void PeerConnectionObserverRffi::AddVideoSink(VideoTrackInterface* track) {
@@ -237,7 +273,7 @@ void PeerConnectionObserverRffi::OnVideoFrame(uint32_t track_id, const webrtc::V
   // and it's a copy of i420 and not RGBA (i420 is smaller than RGBA).
   // TODO: Figure out if we can make the decoder have a larger frame output pool
   // so that we don't need to do this.
-  auto* buffer_owned_rc = Rust_copyAndRotateVideoFrameBuffer(frame.video_frame_buffer().get(), frame.rotation());
+  auto* buffer_owned_rc = enable_video_frame_content_ ? Rust_copyAndRotateVideoFrameBuffer(frame.video_frame_buffer().get(), frame.rotation()) : nullptr;
   // If we rotated the frame, we need to update metadata as well
   if ((metadata.rotation == kVideoRotation_90) || (metadata.rotation == kVideoRotation_270)) {
     metadata.width = frame.height();
@@ -307,8 +343,9 @@ RUSTEXPORT PeerConnectionObserverRffi*
 Rust_createPeerConnectionObserver(void* observer_borrowed,
                                   const PeerConnectionObserverCallbacks* callbacks_borrowed,
                                   bool enable_frame_encryption,
-                                  bool enable_video_frame_event) {
-  return new PeerConnectionObserverRffi(observer_borrowed, callbacks_borrowed, enable_frame_encryption, enable_video_frame_event);
+                                  bool enable_video_frame_event,
+                                  bool enable_video_frame_content) {
+  return new PeerConnectionObserverRffi(observer_borrowed, callbacks_borrowed, enable_frame_encryption, enable_video_frame_event, enable_video_frame_content);
 }
 
 RUSTEXPORT void

@@ -1,7 +1,7 @@
 name: RingRTC CI
 on:
   push:
-    branches: [ master, 'staging/*' ]
+    branches: [ main, 'staging/*' ]
   pull_request: # all target branches
 
 jobs:
@@ -14,8 +14,15 @@ jobs:
       with:
         profile: minimal
         components: rustfmt
-    - name: Check format
-      run: cd src/rust && cargo fmt -- --check
+    - name: Check rust format
+      run: cargo fmt -- --check
+      working-directory: src/rust
+    - name: Install for node
+      run: yarn install --frozen-lockfile
+      working-directory: src/node
+    - name: Check typescript format
+      run: yarn format -c
+      working-directory: src/node
 
   lints:
     name: Lints
@@ -26,7 +33,7 @@ jobs:
       with:
         profile: minimal
         components: clippy
-    - run: shellcheck **/*.sh bin/build-aar bin/build-cli bin/build-electron bin/build-ios bin/build-javadoc bin/build-rustdoc bin/build-target bin/fetch-android-deps bin/gsync-webrtc bin/install-ndk-toolchains bin/prepare-workspace bin/rust-lint-check src/rust/scripts/make-protos src/rust/scripts/run-tests
+    - run: shellcheck **/*.sh bin/build-aar bin/build-cli bin/build-electron bin/build-gctc bin/build-ios bin/build-javadoc bin/build-rustdoc bin/build-target bin/fetch-android-deps bin/gsync-webrtc bin/prepare-workspace bin/rust-lint-check src/rust/scripts/run-tests
     - run: rm -rf out/rust-lint
     - uses: actions-rs/clippy-check@v1
       with:
@@ -45,6 +52,12 @@ jobs:
     - name: Clippy (gctc)
       run: cargo clippy --bin gctc --features native,http -- -D warnings
       working-directory: src/rust
+    - name: Install for node
+      run: yarn install --frozen-lockfile
+      working-directory: src/node
+    - name: Check typescript
+      run: yarn lint
+      working-directory: src/node
 
   tests:
     name: Tests

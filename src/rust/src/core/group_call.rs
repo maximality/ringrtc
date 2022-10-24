@@ -43,7 +43,7 @@ use crate::{
     protobuf,
     webrtc::{
         self,
-        media::{AudioTrack, VideoFrame, VideoSink, VideoTrack},
+        media::{AudioTrack, VideoFrame, VideoFrameMetadata, VideoSink, VideoTrack},
         peer_connection::{AudioLevel, PeerConnection, ReceivedAudioLevel, SendRates},
         peer_connection_factory::{self as pcf, IceServer, PeerConnectionFactory},
         peer_connection_observer::{
@@ -160,7 +160,8 @@ pub enum RemoteDevicesChangedReason {
     MediaKeyReceived(DemuxId),
     SpeakerTimeChanged(DemuxId),
     HeartbeatStateChanged(DemuxId),
-    ForwardeVideosChanged,
+    ForwardedVideosChanged,
+    HigherResolutionPendingChanged,
 }
 
 // The callbacks from the Call to the Observer of the call.
@@ -262,7 +263,7 @@ pub trait Observer {
 // So the ConnectionState will remain Connecting until join() is called.
 // But updates to members joined (via handle_peek_changed)
 // will still be received even when only Connecting.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConnectionState {
     /// Connect() has not yet been called
     /// or disconnect() has been called
@@ -294,7 +295,7 @@ pub enum ConnectionState {
 //      | joined     |
 //      V            |
 //   Joined       -->|
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JoinState {
     /// Join() has not yet been called
     /// or leave() has been called
@@ -555,7 +556,7 @@ impl From<protobuf::group_call::device_to_device::Heartbeat> for HeartbeatState 
 }
 
 // The info about remote devices received from the SFU
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RemoteDeviceState {
     pub demux_id: DemuxId,
     pub user_id: UserId,
@@ -573,6 +574,9 @@ pub struct RemoteDeviceState {
     pub speaker_time: Option<SystemTime>,
     pub leaving_received: bool,
     pub forwarding_video: Option<bool>,
+    pub server_allocated_height: u16,
+    pub client_decoded_height: Option<u32>,
+    pub is_higher_resolution_pending: bool,
 }
 
 fn as_unix_millis(t: Option<SystemTime>) -> u64 {
@@ -600,6 +604,9 @@ impl RemoteDeviceState {
             speaker_time: None,
             leaving_received: false,
             forwarding_video: None,
+            server_allocated_height: 0,
+            client_decoded_height: None,
+            is_higher_resolution_pending: false,
         }
     }
 
@@ -609,6 +616,19 @@ impl RemoteDeviceState {
 
     pub fn added_time_as_unix_millis(&self) -> u64 {
         as_unix_millis(Some(self.added_time))
+    }
+
+    fn recalculate_higher_resolution_pending(&mut self) {
+        let was_pending = self.is_higher_resolution_pending;
+        self.is_higher_resolution_pending =
+            self.server_allocated_height as u32 > self.client_decoded_height.unwrap_or(0);
+
+        if !was_pending && self.is_higher_resolution_pending {
+            info!(
+                "Higher resolution video (height={}) now pending for {}. Current height is {:?}",
+                self.server_allocated_height, self.demux_id, self.client_decoded_height
+            );
+        }
     }
 }
 
@@ -825,12 +845,16 @@ struct State {
     // once per second, you get an "on demand" one.  Any more than that and you
     // wait for the next tick.
     video_requests: Option<Vec<VideoRequest>>,
+    active_speaker_height: Option<u16>,
     on_demand_video_request_sent_since_last_heartbeat: bool,
     speaker_rtp_timestamp: Option<rtp::Timestamp>,
 
     send_rates: SendRates,
+    // If set, will always overide the send_rates.  Intended for testing.
+    send_rates_override: Option<SendRates>,
     max_receive_rate: Option<DataRate>,
-    forwarding_video_demux_ids: HashSet<DemuxId>,
+    // Demux IDs where video is being forward from, mapped to the server allocated height.
+    forwarding_videos: HashMap<DemuxId, u16>,
 
     /// A ring sent to the whole group when the call was created.
     ///
@@ -993,13 +1017,15 @@ impl Client {
                     media_send_key_rotation_state: KeyRotationState::Applied,
 
                     video_requests: None,
+                    active_speaker_height: None,
                     on_demand_video_request_sent_since_last_heartbeat: false,
                     speaker_rtp_timestamp: None,
 
                     send_rates: SendRates::default(),
+                    send_rates_override: None,
                     // If the client never calls set_bandwidth_mode, use the normal max receive rate.
                     max_receive_rate: Some(NORMAL_MAX_RECEIVE_RATE),
-                    forwarding_video_demux_ids: HashSet::default(),
+                    forwarding_videos: HashMap::default(),
 
                     cancellable_initial_ring: None,
 
@@ -1018,6 +1044,14 @@ impl Client {
                 .initialize(client_clone_to_init_peer_connection_observer_impl);
         });
         Ok(client)
+    }
+
+    // Should only be used for testing
+    pub fn override_send_rates(&self, send_rates_override: SendRates) {
+        self.actor.send(move |state| {
+            state.send_rates_override = Some(send_rates_override.clone());
+            Self::set_send_rates_inner(state, send_rates_override);
+        });
     }
 
     // Pulled into a named private method so we can call it recursively.
@@ -1581,16 +1615,19 @@ impl Client {
         });
     }
 
-    fn set_send_rates_inner(state: &mut State, send_rates: SendRates) {
+    fn set_send_rates_inner(state: &mut State, mut send_rates: SendRates) {
+        if let Some(send_rates_override) = &state.send_rates_override {
+            send_rates = send_rates_override.clone();
+        }
         if state.send_rates != send_rates {
             if send_rates.max == Some(ALL_ALONE_MAX_SEND_RATE) {
-                info!(
-                    "Disable audio render and outgoing media because there are no other devices."
-                );
+                info!("Disable audio and outgoing media because there are no other devices.");
+                state.peer_connection.set_audio_recording_enabled(false);
                 state.peer_connection.set_audio_playout_enabled(false);
                 state.peer_connection.set_outgoing_media_enabled(false);
             } else {
-                info!("Enable audio render and outgoing media because there are other devices.");
+                info!("Enable audio and outgoing media because there are other devices.");
+                state.peer_connection.set_audio_recording_enabled(true);
                 state.peer_connection.set_audio_playout_enabled(true);
                 state.peer_connection.set_outgoing_media_enabled(true);
             }
@@ -1605,10 +1642,10 @@ impl Client {
         }
     }
 
-    pub fn request_video(&self, requests: Vec<VideoRequest>) {
+    pub fn request_video(&self, requests: Vec<VideoRequest>, active_speaker_height: u16) {
         debug!(
-            "group_call::Client(outer)::request_video(client_id: {}, requests: {:?})",
-            self.client_id, requests,
+            "group_call::Client(outer)::request_video(client_id: {}, requests: {:?}, active_speaker_height: {})",
+            self.client_id, requests, active_speaker_height,
         );
         self.actor.send(move |state| {
             debug!(
@@ -1616,6 +1653,7 @@ impl Client {
                 state.client_id
             );
             state.video_requests = Some(requests);
+            state.active_speaker_height = Some(active_speaker_height);
             if !state.on_demand_video_request_sent_since_last_heartbeat {
                 Self::send_video_requests_to_sfu(state);
                 state.on_demand_video_request_sent_since_last_heartbeat = true;
@@ -1674,6 +1712,7 @@ impl Client {
                     // ),
                     max_kbps: state.max_receive_rate.map(|rate| rate.as_kbps() as u32),
                     requests,
+                    active_speaker_height: state.active_speaker_height.map(|height| height.into()),
                 }),
                 ..Default::default()
             }) {
@@ -1838,6 +1877,17 @@ impl Client {
                             // from earlier.  For now, it's close enough.
                             let peek_info = peek_info.clone();
                             Self::set_peek_result_inner(state, Ok(peek_info));
+                            if state.remote_devices.is_empty() {
+                                // If there are no remote devices, then Self::set_peek_result_inner
+                                // will not fire handle_remote_devices_changed and the observer can't tell the difference
+                                // between "we know we have no remote devices" and "we don't know what we have yet".
+                                // This way, the observer can.
+                                state.observer.handle_remote_devices_changed(
+                                    state.client_id,
+                                    &state.remote_devices,
+                                    RemoteDevicesChangedReason::DemuxIdsChanged,
+                                );
+                            }
                         }
                         state
                             .observer
@@ -1994,10 +2044,7 @@ impl Client {
         }
         let peek_info = result.unwrap();
 
-        let is_first_update = matches!(
-            state.remote_devices_request_state,
-            RemoteDevicesRequestState::NeverRequested
-        );
+        let is_first_peek_info = state.last_peek_info.is_none();
         let should_request_again = matches!(
             state.remote_devices_request_state,
             RemoteDevicesRequestState::Requested {
@@ -2023,7 +2070,7 @@ impl Client {
             }) => Some(era_id.clone()),
             _ => None,
         };
-        if old_user_ids != new_user_ids || old_era_id != peek_info.era_id {
+        if is_first_peek_info || old_user_ids != new_user_ids || old_era_id != peek_info.era_id {
             state
                 .observer
                 .handle_peek_changed(state.client_id, &peek_info, &new_user_ids)
@@ -2100,10 +2147,7 @@ impl Client {
                 }
             }
 
-            // Note: if the first call to set_peek_result is [], we still fire the
-            // handle_remote_devices_changed to ensure the observer can tell the difference
-            // between "we know we have no remote devices" and "we don't know what we have yet".
-            if demux_ids_changed || is_first_update {
+            if demux_ids_changed {
                 state.observer.handle_remote_devices_changed(
                     state.client_id,
                     &state.remote_devices,
@@ -2783,30 +2827,53 @@ impl Client {
 
     fn handle_rtp_received(&self, header: rtp::Header, payload: &[u8]) {
         use protobuf::group_call::{
-            sfu_to_device::{DeviceJoinedOrLeft, ForwardingVideo, Speaker},
+            sfu_to_device::{CurrentDevices, DeviceJoinedOrLeft, Speaker},
             DeviceToDevice, SfuToDevice,
         };
 
         if header.pt == RTP_DATA_PAYLOAD_TYPE {
             if header.ssrc == RTP_DATA_TO_SFU_SSRC {
-                if let Ok(msg) = SfuToDevice::decode(payload) {
-                    let mut handled = false;
+                // TODO: Use video_request to throttle down how much we send when it's not needed.
+                if let Ok(SfuToDevice {
+                    speaker,
+                    device_joined_or_left,
+                    current_devices,
+                    stats,
+                    video_request: _,
+                }) = SfuToDevice::decode(payload)
+                {
                     if let Some(Speaker {
-                        demux_id: Some(demux_id),
-                    }) = &msg.speaker
+                        demux_id: speaker_demux_id,
+                    }) = speaker
                     {
-                        self.handle_speaker_received(header.timestamp, *demux_id);
-                        handled = true;
+                        if let Some(speaker_demux_id) = speaker_demux_id {
+                            self.handle_speaker_received(header.timestamp, speaker_demux_id);
+                        } else {
+                            warn!("Ignoring speaker demux ID of None from SFU");
+                        }
                     };
-                    if let Some(DeviceJoinedOrLeft { .. }) = msg.device_joined_or_left {
+                    if let Some(DeviceJoinedOrLeft {}) = device_joined_or_left {
                         self.handle_remote_device_joined_or_left();
                     }
-                    if let Some(ForwardingVideo { demux_ids }) = &msg.forwarding_video {
-                        self.handle_forwarding_video_received(demux_ids.iter().copied().collect());
-                        handled = true;
+                    // TODO: Use all_demux_ids to avoid polling
+                    if let Some(CurrentDevices {
+                        demux_ids_with_video,
+                        all_demux_ids: _,
+                        allocated_heights,
+                    }) = current_devices
+                    {
+                        self.handle_forwarding_video_received(
+                            demux_ids_with_video,
+                            allocated_heights,
+                        );
                     }
-                    if !handled {
-                        info!("Received message from SFU over RTP data: {:?}", msg);
+                    if let Some(stats) = stats {
+                        info!(
+                            "ringrtc_stats!,sfu,recv,{},{},{}",
+                            stats.target_send_rate_kbps.unwrap_or(0),
+                            stats.ideal_send_rate_kbps.unwrap_or(0),
+                            stats.allocated_send_rate_kbps.unwrap_or(0)
+                        );
                     }
                 }
                 debug!("Received RTP data from SFU: {:?}.", payload);
@@ -2907,20 +2974,40 @@ impl Client {
         })
     }
 
-    fn handle_forwarding_video_received(&self, forwarding_video_demux_ids: HashSet<DemuxId>) {
+    fn handle_forwarding_video_received(
+        &self,
+        mut demux_ids_with_video: Vec<DemuxId>,
+        allocated_heights: Vec<u32>,
+    ) {
         self.actor.send(move |state| {
-            let forwarding_video_demux_ids = forwarding_video_demux_ids.into_iter().collect();
-            if state.forwarding_video_demux_ids != forwarding_video_demux_ids {
-                info!("SFU notified that the set of forwardinge videos has changed");
+            let forwarding_videos: HashMap<DemuxId, u16> = demux_ids_with_video
+                .iter()
+                .zip(allocated_heights.iter())
+                .map(|(&demux_id, &height)| (demux_id, height as u16))
+                .collect();
+            if state.forwarding_videos != forwarding_videos {
+                demux_ids_with_video.sort_unstable();
+                info!(
+                    "SFU notified that the forwarding videos changed. Demux IDs with video is now {:?}",
+                    demux_ids_with_video
+                );
                 for remote_device in state.remote_devices.iter_mut() {
-                    remote_device.forwarding_video =
-                        Some(forwarding_video_demux_ids.contains(&remote_device.demux_id));
+                    let server_allocated_height = forwarding_videos.get(&remote_device.demux_id);
+                    let is_forwarding = server_allocated_height.is_some();
+                    remote_device.forwarding_video = Some(is_forwarding);
+                    remote_device.server_allocated_height = server_allocated_height.copied().unwrap_or(0);
+
+                    if !is_forwarding {
+                        remote_device.client_decoded_height = None;
+                    }
+
+                    remote_device.recalculate_higher_resolution_pending();
                 }
-                state.forwarding_video_demux_ids = forwarding_video_demux_ids;
+                state.forwarding_videos = forwarding_videos;
                 state.observer.handle_remote_devices_changed(
                     state.client_id,
                     &state.remote_devices,
-                    RemoteDevicesChangedReason::ForwardeVideosChanged,
+                    RemoteDevicesChangedReason::ForwardedVideosChanged,
                 )
             }
         })
@@ -2940,7 +3027,13 @@ impl Client {
                     remote_device.heartbeat_rtp_timestamp = Some(timestamp);
                     let heartbeat_state = HeartbeatState::from(heartbeat);
                     if remote_device.heartbeat_state != heartbeat_state {
+                        if heartbeat_state.video_muted == Some(true) {
+                            remote_device.client_decoded_height = None;
+                            remote_device.recalculate_higher_resolution_pending();
+                        }
+
                         remote_device.heartbeat_state = heartbeat_state;
+
                         state.observer.handle_remote_devices_changed(
                             state.client_id,
                             &state.remote_devices,
@@ -3008,21 +3101,24 @@ fn encode_proto(msg: impl prost::Message) -> Result<BytesMut> {
 struct PeerConnectionObserverImpl {
     client: Option<Client>,
     incoming_video_sink: Option<Box<dyn VideoSink>>,
+    last_height_by_track_id: HashMap<u32, u32>,
 }
 
 impl PeerConnectionObserverImpl {
     fn uninitialized(
         incoming_video_sink: Option<Box<dyn VideoSink>>,
     ) -> Result<(Box<Self>, PeerConnectionObserver<Self>)> {
-        let enable_video_frame_event = incoming_video_sink.is_some();
+        let enable_video_frame_content = incoming_video_sink.is_some();
         let boxed_observer_impl = Box::new(Self {
             client: None,
             incoming_video_sink,
+            last_height_by_track_id: HashMap::new(),
         });
         let observer = PeerConnectionObserver::new(
             webrtc::ptr::Borrowed::from_ptr(&*boxed_observer_impl),
             true, /* enable_frame_encryption */
-            enable_video_frame_event,
+            true, /* enable_video_frame_event */
+            enable_video_frame_content,
         )?;
         Ok((boxed_observer_impl, observer))
     }
@@ -3045,6 +3141,7 @@ impl PeerConnectionObserverTrait for PeerConnectionObserverImpl {
         &mut self,
         _ice_candidate: signaling::IceCandidate,
         _sdp_for_logging: &str,
+        _relay_protocol: Option<webrtc::peer_connection_observer::TransportProtocol>,
     ) -> Result<()> {
         Ok(())
     }
@@ -3163,11 +3260,48 @@ impl PeerConnectionObserverTrait for PeerConnectionObserverImpl {
     fn handle_incoming_video_frame(
         &mut self,
         track_id: u32,
-        video_frame: VideoFrame,
+        video_frame_metadata: VideoFrameMetadata,
+        video_frame: Option<VideoFrame>,
     ) -> Result<()> {
-        if let Some(incoming_video_sink) = self.incoming_video_sink.as_ref() {
+        let height = video_frame_metadata.height;
+        if let (Some(incoming_video_sink), Some(video_frame)) =
+            (self.incoming_video_sink.as_ref(), video_frame)
+        {
             incoming_video_sink.on_video_frame(track_id, video_frame)
         }
+        if let Some(client) = &self.client {
+            let prev_height = self.last_height_by_track_id.insert(track_id, height);
+            if prev_height != Some(height) {
+                client.actor.send(move |state| {
+                    if let Some(remote_device) = state.remote_devices.find_by_demux_id_mut(track_id)
+                    {
+                        // The height needs to be checked again because last_height_by_track_id
+                        // doesn't account for video mute or forwarding state.
+                        if remote_device.client_decoded_height != Some(height)
+                            // Workaround for a race where a frame is received after video muting
+                            && remote_device.heartbeat_state.video_muted != Some(true)
+                        {
+                            remote_device.client_decoded_height = Some(height);
+
+                            let was_higher_resolution_pending =
+                                remote_device.is_higher_resolution_pending;
+                            remote_device.recalculate_higher_resolution_pending();
+
+                            if remote_device.is_higher_resolution_pending
+                                != was_higher_resolution_pending
+                            {
+                                state.observer.handle_remote_devices_changed(
+                                    state.client_id,
+                                    &state.remote_devices,
+                                    RemoteDevicesChangedReason::HigherResolutionPendingChanged,
+                                );
+                            }
+                        }
+                    }
+                });
+            }
+        }
+
         Ok(())
     }
 
@@ -3399,12 +3533,16 @@ mod tests {
             self.cvar.notify_all();
         }
 
-        fn wait(&self) -> T {
+        fn wait(&self, timeout: Duration) -> Option<T> {
             let mut val = self.val.lock().unwrap();
             while val.is_none() {
-                val = self.cvar.wait(val).unwrap();
+                let (wait_val, wait_result) = self.cvar.wait_timeout(val, timeout).unwrap();
+                if wait_result.timed_out() {
+                    return None;
+                }
+                val = wait_val
             }
-            val.clone().unwrap()
+            Some(val.clone().unwrap())
         }
     }
 
@@ -3418,8 +3556,8 @@ mod tests {
             self.waitable.set(());
         }
 
-        fn wait(&self) {
-            self.waitable.wait();
+        fn wait(&self, timeout: Duration) -> bool {
+            self.waitable.wait(timeout).is_some()
         }
     }
 
@@ -3441,7 +3579,10 @@ mod tests {
         outgoing_signaling_blocked: Arc<CallMutex<bool>>,
         sent_group_signaling_messages: Arc<CallMutex<Vec<protobuf::signaling::CallMessage>>>,
 
+        connecting: Event,
         joined: Event,
+        peek_changed: Event,
+        remote_devices_changed: Event,
         remote_devices: Arc<CallMutex<Vec<RemoteDeviceState>>>,
         remote_devices_at_join_time: Arc<CallMutex<Vec<RemoteDeviceState>>>,
         peek_state: Arc<CallMutex<FakeObserverPeekState>>,
@@ -3467,7 +3608,10 @@ mod tests {
                     Vec::new(),
                     "FakeObserver sent group messages",
                 )),
+                connecting: Event::default(),
                 joined: Event::default(),
+                peek_changed: Event::default(),
+                remote_devices_changed: Event::default(),
                 remote_devices: Arc::new(CallMutex::new(Vec::new(), "FakeObserver remote devices")),
                 remote_devices_at_join_time: Arc::new(CallMutex::new(
                     Vec::new(),
@@ -3567,11 +3711,15 @@ mod tests {
         }
 
         fn request_group_members(&self, _client_id: ClientId) {}
+
         fn handle_connection_state_changed(
             &self,
             _client_id: ClientId,
-            _connection_state: ConnectionState,
+            connection_state: ConnectionState,
         ) {
+            if connection_state == ConnectionState::Connecting {
+                self.connecting.set();
+            }
         }
 
         fn handle_join_state_changed(&self, _client_id: ClientId, join_state: JoinState) {
@@ -3601,6 +3749,7 @@ mod tests {
             *owned_remote_devices = remote_devices.to_vec();
             self.handle_remote_devices_changed_invocation_count
                 .fetch_add(1, Ordering::Relaxed);
+            self.remote_devices_changed.set();
         }
 
         fn handle_audio_levels(
@@ -3628,6 +3777,7 @@ mod tests {
             owned_state.era_id = peek_info.era_id.clone();
             owned_state.max_devices = peek_info.max_devices;
             owned_state.device_count = peek_info.device_count;
+            self.peek_changed.set();
         }
 
         fn handle_send_rates_changed(&self, _client_id: ClientId, send_rates: SendRates) {
@@ -3768,7 +3918,7 @@ mod tests {
         fn connect_join_and_wait_until_joined(&self) {
             self.client.connect();
             self.client.join();
-            self.observer.joined.wait();
+            assert!(self.observer.joined.wait(Duration::from_secs(5)));
         }
 
         fn set_remotes_and_wait_until_applied(&self, clients: &[&TestClient]) {
@@ -3821,7 +3971,7 @@ mod tests {
             self.client.actor.send(move |_state| {
                 cloned.set();
             });
-            event.wait();
+            event.wait(Duration::from_secs(5));
         }
 
         fn encrypt_media(&mut self, is_audio: bool, plaintext: &[u8]) -> Result<Vec<u8>> {
@@ -3883,7 +4033,7 @@ mod tests {
 
         fn disconnect_and_wait_until_ended(&self) {
             self.client.disconnect();
-            self.observer.ended.wait();
+            self.observer.ended.wait(Duration::from_secs(5));
         }
     }
 
@@ -4371,6 +4521,36 @@ mod tests {
     }
 
     #[test]
+    fn fire_events_on_first_peek_info() {
+        let client = TestClient::new(vec![1], 1, None);
+
+        client.client.connect();
+        client.client.set_peek_result(Ok(PeekInfo::default()));
+
+        assert!(client.observer.peek_changed.wait(Duration::from_secs(5)));
+
+        client.client.join();
+        client.client.set_peek_result(Ok(PeekInfo {
+            // This gets filtered out.  Make sure we still fire the event.
+            devices: vec![PeekDeviceInfo {
+                demux_id: 1,
+                user_id: Some(b"1".to_vec()),
+            }],
+            creator: None,
+            era_id: None,
+            max_devices: None,
+            device_count: 1,
+        }));
+
+        assert!(client
+            .observer
+            .remote_devices_changed
+            .wait(Duration::from_secs(5)));
+
+        assert_eq!(1, client.observer.peek_state().device_count);
+    }
+
+    #[test]
     fn joined_members() {
         // The peeker doesn't join
         let peeker = TestClient::new(vec![42], 42, None);
@@ -4476,7 +4656,7 @@ mod tests {
         // And when we join(), but only if it's been a while.
         // since we asked before.
         client1.client.join();
-        client1.observer.joined.wait();
+        client1.observer.joined.wait(Duration::from_secs(5));
         assert_eq!(1, client1.sfu_client.request_count());
         client1.client.leave();
         std::thread::sleep(std::time::Duration::from_millis(1200));
@@ -4601,7 +4781,7 @@ mod tests {
                 framerate: None,
             },
         ];
-        client1.client.request_video(requests.clone());
+        client1.client.request_video(requests.clone(), 0);
         let (header, payload) = receiver
             .recv_timeout(Duration::from_secs(1))
             .expect("Get RTP packet to SFU");
@@ -4624,16 +4804,17 @@ mod tests {
                         },
                     ],
                     max_kbps: Some(NORMAL_MAX_RECEIVE_RATE.as_kbps() as u32),
+                    active_speaker_height: None,
                 }),
                 ..Default::default()
             },
             DeviceToSfu::decode(&payload[..]).unwrap()
         );
 
-        client1.client.request_video(requests.clone());
-        client1.client.request_video(requests.clone());
-        client1.client.request_video(requests.clone());
-        client1.client.request_video(requests.clone());
+        client1.client.request_video(requests.clone(), 0);
+        client1.client.request_video(requests.clone(), 0);
+        client1.client.request_video(requests.clone(), 0);
+        client1.client.request_video(requests.clone(), 0);
 
         let before = Instant::now();
         let _ = receiver
@@ -4643,10 +4824,10 @@ mod tests {
         assert!(elapsed > Duration::from_millis(980));
         assert!(elapsed < Duration::from_millis(1020));
 
-        client1.client.request_video(requests.clone());
-        client1.client.request_video(requests.clone());
-        client1.client.request_video(requests.clone());
-        client1.client.request_video(requests);
+        client1.client.request_video(requests.clone(), 1080);
+        client1.client.request_video(requests.clone(), 1080);
+        client1.client.request_video(requests.clone(), 1080);
+        client1.client.request_video(requests, 1080);
 
         let before = Instant::now();
         let _ = receiver
@@ -4685,6 +4866,7 @@ mod tests {
                         },
                     ],
                     max_kbps: Some(1),
+                    active_speaker_height: Some(1080),
                 }),
                 ..Default::default()
             },
@@ -4714,6 +4896,7 @@ mod tests {
                         },
                     ],
                     max_kbps: Some(500),
+                    active_speaker_height: Some(1080),
                 }),
                 ..Default::default()
             },
@@ -4743,6 +4926,7 @@ mod tests {
                         },
                     ],
                     max_kbps: Some(20_000_000),
+                    active_speaker_height: Some(1080),
                 }),
                 ..Default::default()
             },
@@ -4806,7 +4990,7 @@ mod tests {
         );
 
         client1.client.join();
-        client1.observer.joined.wait();
+        client1.observer.joined.wait(Duration::from_secs(5));
         client1.wait_for_client_to_process();
         let remote_devices = client1.observer.remote_devices();
         assert_eq!(2, remote_devices.len());
@@ -4898,7 +5082,10 @@ mod tests {
             era_id: None,
         }));
         client1.client.join();
-        assert_eq!(EndReason::HasMaxDevices, client1.observer.ended.wait());
+        assert_eq!(
+            Some(EndReason::HasMaxDevices),
+            client1.observer.ended.wait(Duration::from_secs(5))
+        );
 
         let client1 = TestClient::new(vec![1], 1, None);
         client1.client.set_peek_result(Ok(PeekInfo {
@@ -5099,12 +5286,18 @@ mod tests {
 
     #[test]
     fn forwarding_video() {
-        let get_forwarding_videos = |client: &TestClient| -> Vec<(DemuxId, Option<bool>)> {
+        let get_forwarding_videos = |client: &TestClient| -> Vec<(DemuxId, Option<bool>, u16)> {
             client
                 .observer
                 .remote_devices()
                 .iter()
-                .map(|remote| (remote.demux_id, remote.forwarding_video))
+                .map(|remote| {
+                    (
+                        remote.demux_id,
+                        remote.forwarding_video,
+                        remote.server_allocated_height,
+                    )
+                })
                 .collect()
         };
 
@@ -5114,27 +5307,122 @@ mod tests {
         client1.connect_join_and_wait_until_joined();
         client1.set_remotes_and_wait_until_applied(&[&client2, &client3]);
 
-        assert_eq!(vec![(2, None), (3, None)], get_forwarding_videos(&client1));
-
-        client1
-            .client
-            .handle_forwarding_video_received([2, 3].iter().copied().collect());
-        client1.wait_for_client_to_process();
-
         assert_eq!(
-            vec![(2, Some(true)), (3, Some(true))],
+            vec![(2, None, 0), (3, None, 0)],
             get_forwarding_videos(&client1)
         );
 
         client1
             .client
-            .handle_forwarding_video_received([2].iter().copied().collect());
+            .handle_forwarding_video_received(vec![2, 3], vec![240, 120]);
         client1.wait_for_client_to_process();
 
         assert_eq!(
-            vec![(2, Some(true)), (3, Some(false))],
+            vec![(2, Some(true), 240), (3, Some(true), 120)],
             get_forwarding_videos(&client1)
         );
+
+        client1
+            .client
+            .handle_forwarding_video_received(vec![2], vec![120]);
+        client1.wait_for_client_to_process();
+
+        assert_eq!(
+            vec![(2, Some(true), 120), (3, Some(false), 0)],
+            get_forwarding_videos(&client1)
+        );
+
+        client1.disconnect_and_wait_until_ended();
+    }
+
+    #[test]
+    fn client_decoded_height() {
+        let get_client_decoded_height = |client: &TestClient| -> Option<u32> {
+            client
+                .observer
+                .remote_devices()
+                .iter()
+                .map(|remote| remote.client_decoded_height)
+                .next()
+                .unwrap()
+        };
+        let set_client_decoded_height = |client: &TestClient, height: u32| -> () {
+            let mut remote_devices = client.observer.remote_devices.lock().unwrap();
+            remote_devices.get_mut(0).unwrap().client_decoded_height = Some(height);
+        };
+
+        let client1 = TestClient::new(vec![1], 1, None);
+        let client2 = TestClient::new(vec![2], 2, None);
+        client1.connect_join_and_wait_until_joined();
+        client1.set_remotes_and_wait_until_applied(&[&client2]);
+
+        assert_eq!(None, get_client_decoded_height(&client1));
+
+        client1
+            .client
+            .handle_forwarding_video_received(vec![2], vec![480]);
+        client1.wait_for_client_to_process();
+
+        set_client_decoded_height(&client1, 480);
+
+        // There is no video when forwarding stops, so the height is None
+        client1
+            .client
+            .handle_forwarding_video_received(vec![], vec![]);
+        client1.wait_for_client_to_process();
+
+        assert_eq!(None, get_client_decoded_height(&client1));
+
+        client1.disconnect_and_wait_until_ended();
+    }
+
+    #[test]
+    fn is_higher_resolution_pending() {
+        let get_forwarding_videos = |client: &TestClient| -> Vec<(DemuxId, u16)> {
+            client
+                .observer
+                .remote_devices()
+                .iter()
+                .map(|remote| (remote.demux_id, remote.server_allocated_height))
+                .collect()
+        };
+        let set_client_decoded_height = |client: &TestClient, height: u32| -> () {
+            let mut remote_devices = client.observer.remote_devices.lock().unwrap();
+            let mut device = remote_devices.get_mut(0).unwrap();
+            device.client_decoded_height = Some(height);
+            device.recalculate_higher_resolution_pending();
+        };
+        let is_higher_resolution_pending = |client: &TestClient| -> bool {
+            let mut remote_devices = client.observer.remote_devices.lock().unwrap();
+            remote_devices
+                .get_mut(0)
+                .unwrap()
+                .is_higher_resolution_pending
+        };
+
+        let client1 = TestClient::new(vec![1], 1, None);
+        let client2 = TestClient::new(vec![2], 2, None);
+        client1.connect_join_and_wait_until_joined();
+        client1.set_remotes_and_wait_until_applied(&[&client2]);
+
+        assert_eq!(vec![(2, 0)], get_forwarding_videos(&client1));
+        assert_eq!(false, is_higher_resolution_pending(&client1));
+
+        client1
+            .client
+            .handle_forwarding_video_received(vec![2], vec![240]);
+        client1.wait_for_client_to_process();
+
+        assert_eq!(vec![(2, 240)], get_forwarding_videos(&client1));
+
+        // A higher resolution is pending because the server allocated a height of 240, but no
+        // video has been decoded yet.
+        assert!(is_higher_resolution_pending(&client1));
+
+        // After receiving the higher resolution video, the pending status is cleared.
+        set_client_decoded_height(&client1, 240);
+
+        assert_eq!(false, is_higher_resolution_pending(&client1));
 
         client1.disconnect_and_wait_until_ended();
     }
