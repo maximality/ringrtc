@@ -911,18 +911,14 @@ public class CallManager<CallType, CallManagerDelegateType>: CallManagerInterfac
         configuration.iceServers = appCallContext.iceServers
 
         // Initialize the configuration.
-        configuration.bundlePolicy = .maxCompat // Fork
-        configuration.rtcpMuxPolicy = .negotiate // Fork
-        configuration.tcpCandidatePolicy = .enabled
+        configuration.bundlePolicy = .maxBundle
+        configuration.rtcpMuxPolicy = .require
+        configuration.tcpCandidatePolicy = .disabled
         configuration.continualGatheringPolicy = .gatherContinually
 
-        /* Fork Commented
         if appCallContext.hideIp {
             configuration.iceTransportPolicy = .relay
         }
-        */
-        
-        configuration.iceTransportPolicy = .all // Fork
 
         // Create the default media constraints.
         let constraints = RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil)
